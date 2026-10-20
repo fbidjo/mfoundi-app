@@ -23,6 +23,11 @@ def _tbl(ws, header_row, first_row, last_row, ncols):
     return pd.DataFrame(rows, columns=heads)
 
 
+def _fin(ws, defaut):
+    """Dernière ligne à lire : au moins `defaut`, davantage si la feuille est plus longue (plafond 5000)."""
+    return min(max(defaut, ws.max_row), 5000)
+
+
 def lire_classeur(chemin):
     """Lit les onglets de SAISIE du classeur Excel (les formules sont ignorées).
     `chemin` peut être un chemin de fichier ou un fichier en mémoire (upload Streamlit)."""
@@ -38,7 +43,7 @@ def lire_classeur(chemin):
     params["taux_pen"] = params["taux_base"] + params["majoration"]
     params["groupes"] = [p.cell(r, 5).value for r in range(4, 14) if p.cell(r, 5).value]
 
-    prod = _tbl(wb["Produits"], 5, 6, 405, 13).iloc[:, :13]
+    prod = _tbl(wb["Produits"], 5, 6, _fin(wb["Produits"], 405), 13).iloc[:, :13]
     prod.columns = ["adressage", "categorie", "niveau", "type", "num_appt", "lot_edd",
                     "superficie", "prix_m2", "prix_total", "alloc_parking", "loc_parking", "emplacement", "observation"]
     prod = prod[prod.adressage.notna()].copy()
@@ -49,25 +54,25 @@ def lire_classeur(chemin):
         return params["prix_parking"] if r.categorie == "Parking" else 0.0
     prod["prix_ht"] = prod.apply(prix_retenu, axis=1)
 
-    acq = _tbl(wb["Acquereurs"], 5, 6, 45, 9).iloc[:, :9]
+    acq = _tbl(wb["Acquereurs"], 5, 6, _fin(wb["Acquereurs"], 45), 9).iloc[:, :9]
     acq.columns = ["id", "nom", "groupe", "bien", "prix_bien", "versement_initial", "duree", "date_1ere", "taux_specifique"]
-    acq = acq[acq.id.notna()].drop(columns=["bien", "prix_bien"]).copy()
+    acq = acq[acq.id.notna() & acq.duree.notna() & acq.date_1ere.notna()].drop(columns=["bien", "prix_bien"]).copy()
     acq["date_1ere"] = pd.to_datetime(acq["date_1ere"])
     acq["versement_initial"] = acq["versement_initial"].fillna(0).astype(float)
     acq["duree"] = acq["duree"].astype(int)
 
-    ven = _tbl(wb["Ventes"], 4, 5, 404, 3)
+    ven = _tbl(wb["Ventes"], 4, 5, _fin(wb["Ventes"], 404), 3)
     ven.columns = ["id", "adressage", "ajustement"]
-    ven = ven[ven.adressage.notna()].copy()
+    ven = ven[ven.id.notna() & ven.adressage.notna()].copy()
     ven["ajustement"] = ven["ajustement"].fillna(0).astype(float)
 
-    pai = _tbl(wb["Paiements"], 4, 5, 1004, 4)
+    pai = _tbl(wb["Paiements"], 4, 5, _fin(wb["Paiements"], 1004), 4)
     pai.columns = ["id", "echeance", "date", "montant"]
-    pai = pai[pai.id.notna()].copy(); pai["date"] = pd.to_datetime(pai["date"])
+    pai = pai[pai.id.notna() & pai.echeance.notna() & pai.montant.notna()].copy(); pai["date"] = pd.to_datetime(pai["date"])
 
-    rem = _tbl(wb["Remb_Anticipes"], 4, 5, 504, 3)
+    rem = _tbl(wb["Remb_Anticipes"], 4, 5, _fin(wb["Remb_Anticipes"], 504), 3)
     rem.columns = ["id", "date", "montant"]
-    rem = rem[rem.id.notna()].copy(); rem["date"] = pd.to_datetime(rem["date"])
+    rem = rem[rem.id.notna() & rem.date.notna() & rem.montant.notna()].copy(); rem["date"] = pd.to_datetime(rem["date"])
     return dict(params=params, produits=prod, acquereurs=acq, ventes=ven, paiements=pai, remb=rem)
 
 
