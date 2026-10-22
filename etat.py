@@ -1,7 +1,8 @@
-"""Données saisies (état de l'application) et passerelle vers le moteur de calcul.
+"""Données saisies (état de l'application, version 2 : base B, taux engagés, simulateur) et passerelle vers le moteur de calcul.
 
 L'état `S` reprend la structure de la démo HTML :
-  params   : tiao, frais, maj, base, ref (AAAA-MM-JJ), auto, dev, parking
+  params   : tiao, frais, maj, base, ref (AAAA-MM-JJ), auto, dev, parking,
+             txeng, actu, kb, charges, effort_max (v2)
   groupes  : liste des groupes
   produits : id, cat, niv, sup, px (prix total, None pour un parking au prix par défaut)
   acq      : id, nom, g, vi, dur, d1 (AAAA-MM-JJ), ts (taux spécifique ou None)
@@ -21,9 +22,25 @@ from moteur import xround
 CHEMIN_DEMO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "donnees_demo.json")
 
 
+PARAMS_DEFAUT = dict(
+    txeng=0.0,        # taux d'intérêt des acquéreurs engagés : 0 % (prix contractuels, v3)
+    actu=0.045,       # taux d'actualisation SIC = taux de neutralisation (VAN nulle)
+    kb=0.728857,      # coefficient de la base de prix B (CA HT 16 346,6 M / grille 26 745,1 M)
+    charges=99976.0,  # charges mensuelles de référence (simulateur)
+    effort_max=0.45,  # taux d'effort éliminatoire
+)
+
+
+def completer(S):
+    """Ajoute les paramètres introduits en version 2 aux anciennes données ou sauvegardes."""
+    for k, v in PARAMS_DEFAUT.items():
+        S["params"].setdefault(k, v)
+    return S
+
+
 def charger_demo():
     with open(CHEMIN_DEMO, encoding="utf-8") as f:
-        return json.load(f)
+        return completer(json.load(f))
 
 
 def _iso(x):
@@ -43,6 +60,7 @@ def depuis_classeur(d, anonymiser=False):
         groupes=list(P["groupes"]),
         produits=[], acq=[], ven=[], pai=[], rem=[],
     )
+    completer(S)
     for r in d["produits"].itertuples():
         if pd.notna(r.prix_total):
             px = float(r.prix_total)
@@ -74,10 +92,11 @@ def reference(S):
 def vers_moteur(S):
     """Construit le dictionnaire attendu par `moteur.calculer`."""
     P = S["params"]
-    tb = P["tiao"] + P["frais"]
+    # v2 : intérêts au taux des acquéreurs engagés (0 % par défaut) ; pénalités à TIAO + frais + majoration
     params = dict(tiao=P["tiao"], frais=P["frais"], majoration=P["maj"], base_jours=int(P["base"]),
                   date_ref=reference(S), devise=P["dev"], prix_parking=float(P["parking"]),
-                  taux_base=tb, taux_pen=tb + P["maj"], groupes=list(S["groupes"]))
+                  taux_base=P.get("txeng", 0.0), taux_pen=P["tiao"] + P["frais"] + P["maj"],
+                  groupes=list(S["groupes"]))
 
     prod = pd.DataFrame([dict(adressage=p["id"], categorie=p["cat"], niveau=p.get("niv"),
                               superficie=np.nan if p["sup"] is None else p["sup"],

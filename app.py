@@ -3,6 +3,9 @@
 Reprend les fonctionnalités de la démo HTML : vue globale, par groupe, plan individuel, acquéreurs,
 paiements, remboursements anticipés et paramètres. Les données de départ viennent du classeur Excel
 (donnees_demo.json) ; les noms d'acquéreurs sont laissés vides.
+
+Version 2 (base B) : acquéreurs engagés à taux 0 % (prix contractuels), pénalités inchangées, et nouvel onglet
+« Simulateur » (scoring du postulant, taux automatique selon la durée, périodicité mensuelle ou trimestrielle).
 """
 import io
 import json
@@ -13,6 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import etat
+import simulateur as sim
 from moteur import calculer, controles, lire_classeur
 
 st.set_page_config(page_title="Plans d'amortissement – Mfoundi", page_icon="🏢", layout="wide")
@@ -112,7 +116,7 @@ with st.sidebar.expander("Charger une sauvegarde ou un classeur"):
     up_json = st.file_uploader("Sauvegarde (.json)", type=["json"], key="up_json")
     if up_json is not None and st.button("Charger la sauvegarde"):
         try:
-            data = json.loads(up_json.getvalue().decode("utf-8"))
+            data = etat.completer(json.loads(up_json.getvalue().decode("utf-8")))
             etat.vers_moteur(data)  # validation de la structure
         except Exception as exc:
             st.error(f"Sauvegarde illisible : {exc}")
@@ -128,13 +132,13 @@ with st.sidebar.expander("Charger une sauvegarde ou un classeur"):
             remplacer(nouveau)
 
 st.title("🏢 Plans d'amortissement · Résidence Mfoundi")
-st.caption("Vente de logements à tempérament, suivi des acquéreurs · version de démonstration")
+st.caption("Vente de logements à tempérament, suivi des acquéreurs · version 2 · base B")
 if st.session_state.get("flash"):
     st.success(st.session_state.pop("flash"))
 
 tabs = st.tabs(["Vue globale", "Par groupe", "Plan individuel", "Acquéreurs", "Paiements", "Remboursements",
-                "Paramètres"])
-t_glob, t_grp, t_plan, t_acq, t_pai, t_rem, t_par = tabs
+                "Simulateur", "Paramètres"])
+t_glob, t_grp, t_plan, t_acq, t_pai, t_rem, t_sim, t_par = tabs
 
 # ------------------------------------------------------------------ Paramètres (rendus en premier : le calcul en dépend)
 with t_par:
@@ -157,16 +161,29 @@ with t_par:
                                format="DD/MM/YYYY", key="par_ref")
     if not P["auto"]:
         P["ref"] = ref_saisie.isoformat()
-    tb = P["tiao"] + P["frais"]
-    st.info(f"Taux appliqué aux acquéreurs : {pct(tb)} · taux de pénalité : {pct(tb + P['maj'])} · "
-            f"pénalité = impayé × taux × jours de retard ÷ {P['base']}.")
+    st.markdown("**Acquéreurs engagés et simulateur (version 2)**")
+    d1, d2, d3 = st.columns(3)
+    P["txeng"] = d1.number_input("Taux d'intérêt des acquéreurs engagés (%)", 0.0, 50.0,
+                                 round(P["txeng"] * 100, 3), 0.025, format="%.3f", key="par_txeng") / 100
+    P["actu"] = d2.number_input("Taux d'actualisation SIC (%)", 0.0, 50.0, round(P["actu"] * 100, 3), 0.025,
+                                format="%.3f", key="par_actu") / 100
+    P["kb"] = d3.number_input("Coefficient base B", 0.1, 1.5, float(P["kb"]), 0.001, format="%.6f", key="par_kb")
+    d4, d5, _ = st.columns(3)
+    P["charges"] = float(d4.number_input("Charges mensuelles de référence", 0, 10_000_000, int(P["charges"]), 1000,
+                                         key="par_chg"))
+    P["effort_max"] = d5.number_input("Taux d'effort éliminatoire (%)", 10.0, 100.0, round(P["effort_max"] * 100, 1),
+                                      1.0, key="par_eff") / 100
+    tb = P["txeng"]
+    tpen = P["tiao"] + P["frais"] + P["maj"]
+    st.info(f"Taux d'intérêt des acquéreurs engagés : {pct(tb)} (prix contractuels conservés) · taux de pénalité : "
+            f"{pct(tpen)} · pénalité = impayé × taux × jours de retard ÷ {P['base']}.")
     if st.button("Réinitialiser la démonstration"):
         remplacer(etat.charger_demo())
 
 # ------------------------------------------------------------------ calcul
 ref = etat.reference(S)
-tb = S["params"]["tiao"] + S["params"]["frais"]
-tp = tb + S["params"]["maj"]
+tb = S["params"]["txeng"]
+tp = S["params"]["tiao"] + S["params"]["frais"] + S["params"]["maj"]
 synth, plan, ventes, alertes = calc(json.dumps(S, sort_keys=True), date.today().isoformat())
 a_des_acq = len(synth) > 0
 noms = {a["id"]: a.get("nom", "") for a in S["acq"]}
@@ -461,3 +478,122 @@ with t_rem:
                 st.rerun()
         else:
             st.info("Aucun remboursement anticipé.")
+
+# ------------------------------------------------------------------ Simulateur (nouveaux acquéreurs)
+with t_sim:
+    P = S["params"]
+    sim.P.update(taux_actualisation=P["actu"], charges=P["charges"], effort_elim=P["effort_max"])
+    st.subheader("Simulateur de mensualité et scoring d'un postulant")
+    st.caption("Le taux baisse automatiquement quand la durée raccourcit, jusqu'au taux d'actualisation SIC "
+               f"({pct(P['actu'])}, VAN nulle). Périodicité trimestrielle : même taux annuel effectif que le mensuel.")
+    vendus = {v["adr"] for v in S["ven"]}
+    libres = [p for p in S["produits"] if p["id"] not in vendus and p["px"] is not None]
+    s1, s2 = st.columns(2)
+    choix = s1.selectbox("Produit disponible", ["Prix libre"] + [p["id"] for p in libres], key="sim_prod",
+                         format_func=lambda i: i if i == "Prix libre" else
+                         next(f"{p['id']} · {p['cat']} · {nombre(p['px'])}" for p in libres if p["id"] == i))
+    base = s2.radio("Base de prix", ["Base B", "Prix affichés"], horizontal=True, key="sim_base")
+    px0 = next((p["px"] for p in libres if p["id"] == choix), 140_000_000.0)
+    px0 = px0 * (P["kb"] if base == "Base B" else 1.0)
+    prix = float(st.number_input("Prix du lot", 0, 5_000_000_000, int(round(px0)), 100_000, key=f"sim_prix_{choix}_{base}"))
+
+    c1, c2, c3, c4 = st.columns(4)
+    apport = c1.slider("Apport (%)", 20, 60, 35, key="sim_apport") / 100
+    duree = int(c2.slider("Durée (mois)", 12, 120, 84, 3, key="sim_duree"))
+    per = c3.radio("Périodicité", list(sim.PERIODICITE), horizontal=True, key="sim_per")
+    depart = c4.date_input("Première échéance", date(2027, 1, 5), format="DD/MM/YYYY", key="sim_dep")
+
+    st.markdown("**Profil du postulant** (exemple modifiable)")
+    q1, q2, q3 = st.columns(3)
+    revenu = float(q1.number_input("Revenu net mensuel", 0, 1_000_000_000, 5_800_000, 50_000, key="sim_rev"))
+    enc = float(q2.number_input("Mensualités en cours", 0, 100_000_000, 0, 10_000, key="sim_enc"))
+    patr = float(q3.number_input("Patrimoine net", 0, 10_000_000_000, 120_000_000, 5_000_000, key="sim_pat"))
+    q4, q5, q6 = st.columns(3)
+    stab = q4.selectbox("Stabilité des revenus", list(sim.STABILITE), key="sim_stab")
+    comp = q5.selectbox("Comportement bancaire", list(sim.COMPORTEMENT), key="sim_comp")
+    gar = q6.selectbox("Garanties offertes", list(sim.GARANTIES), key="sim_gar")
+    e1, e2, e3 = st.columns(3)
+    pf = e1.checkbox("Pièce fausse", key="sim_pf")
+    of = e2.checkbox("Origine des fonds non justifiée", key="sim_of")
+    pl = e3.checkbox("Partie liée non déclarée", key="sim_pl")
+    m1, m2 = st.columns(2)
+    imposee = m1.selectbox("Classe retenue", ["Selon le scoring", "A", "B", "C"], key="sim_cls")
+    mode = m2.radio("Taux", ["Automatique", "Manuel"], horizontal=True, key="sim_mode")
+    tman = (m2.number_input("Taux annuel (%)", 0.0, 30.0, 5.5, 0.1, key="sim_tman") / 100) if mode == "Manuel" else None
+
+    post = sim.Postulant("SIM", "Simulation", prix, max(revenu, 1.0), enc, stab, comp, patr, apport, gar,
+                         duree, per, pf, of, pl)
+    ev = sim.evaluer(post)
+    classe = ev["classe"] if imposee == "Selon le scoring" else imposee
+    k = st.columns(4)
+    k[0].metric("Score", f"{ev['score']} / 100")
+    k[1].metric("Classe du scoring", ev["classe"])
+    k[2].metric("Taux d'effort estimé", pct(ev["taux_effort"]))
+    k[3].metric("Capital financé", argent(ev["capital"]))
+    if ev["eliminatoires"]:
+        st.error("Critère éliminatoire : " + ", ".join(ev["eliminatoires"]))
+    st.caption("Points : " + " · ".join(f"{n} {v}" for n, v in ev["points"].items()))
+
+    if classe not in ("A", "B", "C"):
+        st.warning("Classe D ou refus : paiement comptant avec remise de 2 %, ou refus. "
+                   "Choisissez une classe dans « Classe retenue » pour simuler tout de même un plan.")
+    else:
+        sc, dmax, tc, amin, garex = sim.CLASSES[classe]
+        d = min(duree, dmax) if mode == "Automatique" else duree
+        if per == "Trimestrielle":
+            d = d // 3 * 3
+        t = sim.taux_ajuste(classe, d) if mode == "Automatique" else tman
+        m = sim.PERIODICITE[per]
+        cap = ev["capital"]
+        res = sim.plan(cap, t, d, per, depart)
+        eff = (res["echeance"] * m / 12 + P["charges"] + enc) / max(revenu, 1.0)
+        if d < duree:
+            st.info(f"Durée ramenée à {d} mois (maximum de la classe {classe}).")
+        if apport < amin - 1e-9 and mode == "Automatique":
+            st.warning(f"Apport inférieur au minimum de la classe {classe} ({amin:.0%}).")
+        if eff > P["effort_max"]:
+            st.error(f"Taux d'effort final de {pct(eff)} : au-dessus du seuil éliminatoire.")
+        st.caption(f"Garanties exigées en classe {classe} : {garex}.")
+        k = st.columns(4)
+        k[0].metric("Échéance " + ("mensuelle" if m == 12 else "trimestrielle"), argent(res["echeance"]))
+        k[1].metric("Taux appliqué", pct(t), f"classe {classe} : {pct(tc)}", delta_color="off")
+        k[2].metric("Total payé", argent(res["total"]), f"dont intérêts {nombre(res['interets'])}", delta_color="off")
+        k[3].metric("VAN de la marge SIC", argent(res["van_marge"]))
+        k = st.columns(3)
+        k[0].metric("Taux d'effort final", pct(eff))
+        k[1].metric("Revenu net requis (33 %)", argent((res["echeance"] * m / 12 + P["charges"] + enc) / 0.33))
+        k[2].metric("Échéances", len(res["lignes"]))
+
+        L = pd.DataFrame(res["lignes"], columns=["N°", "Date", "Capital début", "Échéance", "Intérêts",
+                                                 "Capital remboursé", "Capital fin"])
+        g1, g2 = st.columns(2)
+        lbl = [x.strftime("%m/%y") for x in L["Date"]]
+        f1 = go.Figure()
+        f1.add_bar(x=lbl, y=L["Capital remboursé"], name="Capital", marker_color=TEAL)
+        f1.add_bar(x=lbl, y=L["Intérêts"], name="Intérêts", marker_color=AMBRE)
+        f1.update_layout(barmode="stack", title="Composition des échéances", height=330,
+                         margin=dict(t=50, b=30, l=10, r=10), legend=dict(orientation="h", y=-0.2))
+        g1.plotly_chart(f1)
+        f2 = go.Figure(go.Scatter(x=lbl, y=L["Capital fin"], fill="tozeroy", line=dict(color=TEAL)))
+        f2.update_layout(title="Capital restant dû", height=330, margin=dict(t=50, b=30, l=10, r=10))
+        g2.plotly_chart(f2)
+
+        st.subheader("Comparatif des durées")
+        cp = pd.DataFrame(sim.comparatif(classe, cap))
+        if len(cp):
+            cp["rev"] = (cp.mensualite + P["charges"] + enc) / 0.33
+            tcp = pd.DataFrame({"Durée (mois)": cp.duree, "Taux": cp.taux.map(pct),
+                                "Mensualité": cp.mensualite, "Trimestrialité": cp.trimestrialite,
+                                "Intérêts (mensuel)": cp.interets_m, "VAN marge (mensuel)": cp.van_m,
+                                "Économie d'intérêts": cp.economie, "Revenu net requis": cp.rev})
+            montrer(tcp, {c: nombre for c in tcp.columns if c not in ("Durée (mois)", "Taux")})
+        st.subheader("Tableau d'amortissement")
+        T = L.copy(); T["Date"] = T["Date"].map(lambda x: x.strftime("%d/%m/%Y"))
+        montrer(T, {c: nombre for c in T.columns if c not in ("N°", "Date")})
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+            T.to_excel(xw, sheet_name="Simulation", index=False)
+            xw.sheets["Simulation"].set_column(0, 7, 18)
+        st.download_button("⬇️ Télécharger cette simulation (Excel)", data=buf.getvalue(),
+                           file_name="Simulation_echeancier.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
